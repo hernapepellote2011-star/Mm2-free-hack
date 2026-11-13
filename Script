@@ -1,16 +1,13 @@
-
 local mt = getrawmetatable(game)
 make_writeable(mt)
 local old = mt.__namecall
 mt.__namecall = newcclosure(function(self, ...)
     local method = getnamecallmethod()
     if method == "Kick" or method == "kick" then
-        return wait(9e9) -- Detiene el intento de expulsión infinitamente
+        return wait(9e9)
     end
     return old(self, ...)
 end)
-
---// MM2 HUB ULTIMATE · por dremmser · interfaz: Space Hub (un solo guion)
 
 pcall(function() if _G.MM2_ONLINE_STOP then _G.MM2_ONLINE_STOP() end end)
 pcall(function() if _G.MM2_HUB_CLEANUP then _G.MM2_HUB_CLEANUP() end end)
@@ -25,7 +22,6 @@ if not ok or type(SpaceHub) ~= "table" then
 	return
 end
 
---// Servicios
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
@@ -38,7 +34,6 @@ local Camera = workspace.CurrentCamera
 local PROFILE_URL = "https://www.roblox.com/es/users/9059869146/profile"
 local FLING_TIME = 5
 
---// Contador en línea (Firebase)
 local Online = (function()
 	local DB = "https://nhfkjvgfnlk-default-rtdb.firebaseio.com/online"
 	local req = request or http_request or (syn and syn.request) or (http and http.request)
@@ -156,7 +151,6 @@ local Online = (function()
 end)()
 _G.MM2_ONLINE_STOP = Online.stop
 
---// Ventana
 local Window = SpaceHub:CreateWindow({
 	Name = "MM2 HUB ULTIMATE",
 	Theme = "Space",
@@ -175,7 +169,6 @@ local function untoggle(t)
 	if t and t.CurrentValue then t:Set(false) end
 end
 
---// Roles
 local function getPlayerRole(player)
 	if not player then return "Innocent" end
 	local char = player.Character
@@ -212,7 +205,6 @@ local function findMurderer()
 	return nil
 end
 
---// Estado
 local SheriffAimbotEnabled, IgnoreWallsEnabled = false, false
 local MurdererReachEnabled, PreviewMeshEnabled = false, false
 local HitboxReachSize = 7
@@ -233,7 +225,6 @@ local afToggle
 
 local unbindOnline
 
---// Pestañas
 local quickTab = Window:CreateTab("⚡ Rápido")
 local sheriffTab = Window:CreateTab("Sheriff")
 local murdererTab = Window:CreateTab("Asesino")
@@ -244,7 +235,6 @@ local spectTab = Window:CreateTab("Espectador")
 local configTab = Window:CreateTab("Config")
 local reviewTab = Window:CreateTab("Reseñas")
 
---// ===== RÁPIDO =====
 quickTab:CreateSection("Comunidad")
 local onlineLabel = quickTab:CreateLabel("Conectando...")
 unbindOnline = Online.bind(function(n)
@@ -256,7 +246,6 @@ end)
 
 quickTab:CreateSection("Acciones")
 
--- Antifling
 local function stopAnti()
 	antiEnabled = false
 	if antiConn then antiConn:Disconnect() antiConn = nil end
@@ -284,7 +273,6 @@ local function startAnti()
 	end)
 end
 
--- Volar al asesino
 local function flingMurderer()
 	if flinging then return end
 
@@ -379,7 +367,6 @@ antiToggle = quickTab:CreateToggle({
 	end,
 })
 
--- ESP / TP de pistola (helpers)
 local function clearCoinESP()
 	for _, v in ipairs(workspace:GetDescendants()) do
 		if v.Name == "XenonCoinHighlight" then v:Destroy() end
@@ -557,7 +544,6 @@ quickTab:CreateButton({
 	end,
 })
 
--- Fly
 local controls
 task.spawn(function()
 	local ok2, result = pcall(function()
@@ -665,7 +651,6 @@ quickTab:CreateSlider({
 	end,
 })
 
--- Invisible
 local function setInvTransparency(t)
 	for _, p in ipairs(invParts) do
 		if p.Parent then p.Transparency = t end
@@ -745,7 +730,222 @@ charConn = Player.CharacterAdded:Connect(function()
 	untoggle(invToggle)
 end)
 
---// ===== SHERIFF =====
+do
+	local AV_BASE_REACH   = 8
+	local AV_EXTRA        = 6
+	local AV_LOOKAHEAD    = 0.35
+	local AV_RELEASE_WAIT = 0.4
+	local AV_KNIFE_SPEED  = 12
+	local AV_TICK         = 0.05
+
+	local avActive = false
+	local avConn, avAddConn
+	local avAuto = false
+	local avSafeSince = nil
+	local avLastPos = nil
+	local avLastTick = 0
+	local avKnives = setmetatable({}, { __mode = "k" })
+
+	local function avIsKnifeName(n)
+		n = n:lower()
+		return n:find("knife") ~= nil or n:find("cuchillo") ~= nil
+	end
+
+	local function avIsProjectile(inst)
+		if inst:FindFirstAncestorOfClass("Tool") then return false end
+		local m = inst
+		while m and m ~= workspace do
+			if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then return false end
+			m = m.Parent
+		end
+		return true
+	end
+
+	local function avRegister(inst)
+		if not (inst:IsA("BasePart") or inst:IsA("Model")) then return end
+		if not avIsKnifeName(inst.Name) then return end
+		if not avIsProjectile(inst) then return end
+		if not avKnives[inst] then avKnives[inst] = {} end
+	end
+
+	local function avPartOf(inst)
+		if inst:IsA("BasePart") then return inst end
+		return inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true)
+	end
+
+	local function avKnifeTool(plr)
+		local char = plr.Character
+		local tool = char and char:FindFirstChildOfClass("Tool")
+		if tool and avIsKnifeName(tool.Name) then return tool, true end
+		local bp = plr:FindFirstChild("Backpack")
+		if bp then
+			for _, it in ipairs(bp:GetChildren()) do
+				if it:IsA("Tool") and avIsKnifeName(it.Name) then return it, false end
+			end
+		end
+		return nil, false
+	end
+
+	local function avMurdererDanger(myPos, extra)
+		local m, mHrp = findMurderer()
+		if not m then return false end
+
+		local reach = AV_BASE_REACH
+		local partThreat = false
+		local tool, equipped = avKnifeTool(m)
+		if tool then
+			for _, d in ipairs(tool:GetDescendants()) do
+				if d:IsA("BasePart") then
+					local dim = math.max(d.Size.X, d.Size.Y, d.Size.Z)
+					if equipped then
+						local offset = (d.Position - mHrp.Position).Magnitude
+						reach = math.max(reach, offset + dim / 2)
+						if (d.Position - myPos).Magnitude - dim / 2 < extra then
+							partThreat = true
+						end
+					else
+						reach = math.max(reach, dim / 2 + AV_BASE_REACH / 2)
+					end
+				end
+			end
+		end
+
+		local dist = (myPos - mHrp.Position).Magnitude
+		local predicted = (myPos - (mHrp.Position + mHrp.AssemblyLinearVelocity * AV_LOOKAHEAD)).Magnitude
+		return partThreat or math.min(dist, predicted) < (reach + extra)
+	end
+
+	local function avKnifeThreat(myPos, dt)
+		local threat = false
+		for inst, info in pairs(avKnives) do
+			if not inst.Parent then
+				avKnives[inst] = nil
+			else
+				local part = avPartOf(inst)
+				if part then
+					local pos = part.Position
+					local vel = part.AssemblyLinearVelocity
+					if info.pos and dt > 0 then
+						local v2 = (pos - info.pos) / dt
+						if v2.Magnitude > vel.Magnitude then vel = v2 end
+					end
+					info.pos = pos
+
+					local speed = vel.Magnitude
+					if speed >= AV_KNIFE_SPEED and speed < 2000 then
+						local toMe = myPos - pos
+						local dir = vel.Unit
+						local along = toMe:Dot(dir)
+						if along > 0 then
+							local perp = (toMe - dir * along).Magnitude
+							local tti = along / speed
+							local half = math.max(part.Size.X, part.Size.Y, part.Size.Z) / 2
+							if perp < half + 4 + AV_EXTRA * 0.5 and tti < 1.2 then
+								threat = true
+							end
+						end
+					end
+				end
+			end
+		end
+		return threat
+	end
+
+	local function avTick()
+		if not avActive then return end
+		local now = os.clock()
+		if now - avLastTick < AV_TICK then return end
+		local elapsed = now - avLastTick
+		avLastTick = now
+
+		if avAuto and not invisible then
+			avAuto, avSafeSince = false, nil
+		end
+
+		local char = Player.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not (hum and hrp) or hum.Health <= 0 or flinging then return end
+
+		local myPos = hrp.Position
+		if myPos.Y < workspace.FallenPartsDestroyHeight + 5 then
+			myPos = avLastPos
+		else
+			avLastPos = myPos
+		end
+		if not myPos then return end
+
+		local knifeThreat = avKnifeThreat(myPos, elapsed)
+		local danger = knifeThreat or avMurdererDanger(myPos, AV_EXTRA + (avAuto and 3 or 0))
+
+		if danger then
+			avSafeSince = nil
+			if not invisible then
+				startInvisible()
+				if invisible then
+					avAuto = true
+					pcall(function()
+						if invToggle and not invToggle.CurrentValue then invToggle:Set(true) end
+					end)
+				end
+			end
+		elseif avAuto then
+			avSafeSince = avSafeSince or now
+			if now - avSafeSince >= AV_RELEASE_WAIT then
+				avAuto, avSafeSince = false, nil
+				if invisible then stopInvisible() end
+			end
+		end
+	end
+
+	local function avStart()
+		if avActive then return end
+		avActive = true
+		avAuto, avSafeSince, avLastPos = false, nil, nil
+		avLastTick = os.clock()
+		avKnives = setmetatable({}, { __mode = "k" })
+		for _, d in ipairs(workspace:GetDescendants()) do avRegister(d) end
+		avAddConn = workspace.DescendantAdded:Connect(avRegister)
+		avConn = RunService.Heartbeat:Connect(avTick)
+	end
+
+	local function avStop()
+		if not avActive then return end
+		avActive = false
+		if avConn then avConn:Disconnect() avConn = nil end
+		if avAddConn then avAddConn:Disconnect() avAddConn = nil end
+		avKnives = setmetatable({}, { __mode = "k" })
+		if avAuto then
+			avAuto = false
+			if invisible then pcall(stopInvisible) end
+		end
+	end
+
+	quickTab:CreateToggle({
+		Name = "Evitar asesino",
+		CurrentValue = false,
+		Callback = function(val)
+			if val then
+				avStart()
+				notify("🛡 Evitar asesino activado")
+			else
+				avStop()
+				notify("Evitar asesino desactivado")
+			end
+		end,
+	})
+
+	quickTab:CreateSlider({
+		Name = "Studs extra de seguridad",
+		Range = {0, 30},
+		Increment = 1,
+		CurrentValue = 6,
+		Callback = function(v) AV_EXTRA = v end,
+	})
+
+	_G.MM2_AVOID_STOP = avStop
+end
+
 sheriffTab:CreateToggle({
 	Name = "Activar Aimbot (Torso)",
 	CurrentValue = false,
@@ -794,7 +994,6 @@ sheriffTab:CreateToggle({
 	Callback = function(val) IgnoreWallsEnabled = val end,
 })
 
---// ===== ASESINO =====
 murdererTab:CreateToggle({
 	Name = "Tamaño de malla de daño",
 	CurrentValue = false,
@@ -867,7 +1066,6 @@ reachConn = RunService.RenderStepped:Connect(function()
 	end
 end)
 
---// ===== ESP =====
 local function clearPlayerESP()
 	for _, p in ipairs(Players:GetPlayers()) do
 		if p.Character then
@@ -995,7 +1193,6 @@ espTab:CreateToggle({
 	end,
 })
 
---// ===== MEJORA DEL JUEGO =====
 improveTab:CreateToggle({
 	Name = "Full fps",
 	CurrentValue = false,
@@ -1018,7 +1215,6 @@ improveTab:CreateToggle({
 	end,
 })
 
---// ===== AUTOFARM =====
 do
 	local AF_SPEED         = 30
 	local AF_MAX_TRAVEL    = 2
@@ -1397,11 +1593,9 @@ do
 		end,
 	})
 
-	-- permite detener el autofarm desde el cleanup general
 	_G.MM2_AF_STOP = function() afStop("user", true) end
 end
 
---// ===== ESPECTADOR =====
 local Spec
 local profileGui
 
@@ -1501,7 +1695,6 @@ spectTab:CreateToggle({
 })
 createProfileButton()
 
---// ===== CONFIG =====
 configTab:CreateSection("Sígueme para más scripts")
 configTab:CreateButton({
 	Name = "COPIAR PERFIL",
@@ -1548,7 +1741,6 @@ configTab:CreateButton({
 	end,
 })
 
---// ===== RESEÑAS =====
 local WEBHOOK_PROXY_URL = "https://webhook.lewisakura.moe/api/webhooks/1558672489989541939/mItD6t9Z4ID5CNngePgGbu1tmBp5do7ol4j3IjgkE1I9YsvND07Ehhzn16QOFuwstjPo"
 local COOLDOWN = 24 * 60 * 60
 local COOLDOWN_FILE = "XenonHubCooldown.txt"
@@ -1696,7 +1888,6 @@ task.spawn(function()
 	end
 end)
 
---// ===== CLEANUP =====
 local function cleanup()
 	if destroyed then return end
 	destroyed = true
@@ -1710,6 +1901,7 @@ local function cleanup()
 	if previewPart then previewPart:Destroy() previewPart = nil end
 
 	pcall(stopAnti)
+	pcall(function() if _G.MM2_AVOID_STOP then _G.MM2_AVOID_STOP() end end)
 	pcall(function() if _G.MM2_AF_STOP then _G.MM2_AF_STOP() end end)
 	if flying then pcall(stopFly) end
 	if invisible then pcall(stopInvisible) end
@@ -1722,7 +1914,6 @@ local function cleanup()
 	_G.MM2_HUB_CLEANUP = nil
 end
 
--- cualquier cierre de Space Hub (botón cerrar, SALIR o re-ejecución) apaga todo
 local originalDestroy = SpaceHub.Destroy
 SpaceHub.Destroy = function(self, ...)
 	cleanup()
